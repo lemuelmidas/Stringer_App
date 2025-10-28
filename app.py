@@ -4,23 +4,23 @@ import hashlib
 from collections import Counter
 import os
 
+# ----------------------------
+# App setup
+# ----------------------------
 app = Flask(__name__)
 
-# -----------------------------
-# Database configuration
-# -----------------------------
-# Ensure 'instance' folder exists
-os.makedirs(os.path.join(os.path.dirname(__file__), "instance"), exist_ok=True)
+# Ensure instance folder exists
+os.makedirs(os.path.join(os.path.abspath(os.path.dirname(__file__)), "instance"), exist_ok=True)
 
+# Database config
 db_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "instance", "app.db")
 app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_path}"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-
 db = SQLAlchemy(app)
 
-# -----------------------------
-# Database model
-# -----------------------------
+# ----------------------------
+# Model
+# ----------------------------
 class AnalyzedString(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     value = db.Column(db.Text, unique=True, nullable=False)
@@ -40,15 +40,19 @@ class AnalyzedString(db.Model):
             "unique_characters": self.unique_characters,
             "word_count": self.word_count,
             "sha256_hash": self.sha256_hash,
-            "character_frequency_map": self.character_frequency_map
+            "character_frequency_map": self.character_frequency_map,
         }
 
-# -----------------------------
-# Utility function
-# -----------------------------
+# Create DB tables
+with app.app_context():
+    db.create_all()
+
+# ----------------------------
+# Helper function
+# ----------------------------
 def analyze_string(text):
     clean_text = text.strip()
-    analysis = {
+    return {
         "length": len(clean_text),
         "is_palindrome": clean_text.lower() == clean_text[::-1].lower(),
         "unique_characters": len(set(clean_text)),
@@ -56,28 +60,26 @@ def analyze_string(text):
         "sha256_hash": hashlib.sha256(clean_text.encode()).hexdigest(),
         "character_frequency_map": dict(Counter(clean_text)),
     }
-    return analysis
 
-# -----------------------------
-# Homepage
-# -----------------------------
-@app.route("/", methods=["GET"])
+# ----------------------------
+# Routes
+# ----------------------------
+
+@app.route("/")
 def home():
-    return jsonify({
-        "message": "Welcome to the String Analyzer API!",
-        "available_endpoints": {
-            "/strings/": "GET all strings, POST new string",
-            "/strings/<value>/": "GET a single string",
-            "/strings/<value>/delete/": "DELETE a string",
-            "/strings/filter/": "GET with natural language filter, e.g., ?query=palindrome"
-        }
-    })
+    return """
+    <html>
+        <head><title>String Analyzer API</title></head>
+        <body style="text-align:center; margin-top:50px; font-family:Arial;">
+            <h1>Welcome to the String Analyzer API!</h1>
+            <p><a href="/strings/">Click here</a> to explore all strings.</p>
+        </body>
+    </html>
+    """
 
-# -----------------------------
-# Create / List Strings
-# -----------------------------
+# POST /strings and GET /strings
 @app.route("/strings/", methods=["GET", "POST"])
-def strings():
+def list_create_strings():
     if request.method == "POST":
         data = request.get_json()
         if not data or "value" not in data:
@@ -85,18 +87,20 @@ def strings():
 
         value = data["value"]
 
-        # Check duplicates
+        # Check duplicate
         if AnalyzedString.query.filter_by(value=value).first():
             return jsonify({"error": "String already analyzed"}), 409
 
-        analyzed_data = analyze_string(value)
-        new_string = AnalyzedString(value=value, **analyzed_data)
+        analysis = analyze_string(value)
+        new_string = AnalyzedString(value=value, **analysis)
         db.session.add(new_string)
         db.session.commit()
         return jsonify(new_string.to_dict()), 201
 
-    # GET all strings with optional filters
+    # GET /strings
     query = AnalyzedString.query
+
+    # Optional filters
     min_length = request.args.get("min_length", type=int)
     max_length = request.args.get("max_length", type=int)
     is_palindrome = request.args.get("is_palindrome")
@@ -106,60 +110,56 @@ def strings():
     if max_length is not None:
         query = query.filter(AnalyzedString.length <= max_length)
     if is_palindrome is not None:
-        query = query.filter(AnalyzedString.is_palindrome == (is_palindrome.lower() == "true"))
+        is_pal = is_palindrome.lower() == "true"
+        query = query.filter(AnalyzedString.is_palindrome == is_pal)
 
     results = [s.to_dict() for s in query.all()]
     return jsonify(results), 200
 
-# -----------------------------
-# Get / Delete single string
-# -----------------------------
+# GET single string
 @app.route("/strings/<string:value>/", methods=["GET"])
 def get_string(value):
-    s = AnalyzedString.query.filter_by(value=value).first()
-    if not s:
+    string_obj = AnalyzedString.query.filter_by(value=value).first()
+    if not string_obj:
         return jsonify({"error": "String not found"}), 404
-    return jsonify(s.to_dict()), 200
+    return jsonify(string_obj.to_dict()), 200
 
+# DELETE string
 @app.route("/strings/<string:value>/delete/", methods=["DELETE"])
 def delete_string(value):
-    s = AnalyzedString.query.filter_by(value=value).first()
-    if not s:
+    string_obj = AnalyzedString.query.filter_by(value=value).first()
+    if not string_obj:
         return jsonify({"error": "String not found"}), 404
-    db.session.delete(s)
+    db.session.delete(string_obj)
     db.session.commit()
     return jsonify({"message": "Deleted successfully"}), 200
 
-# -----------------------------
-# Natural language filter
-# -----------------------------
-@app.route("/strings/filter/", methods=["GET"])
-def filter_natural():
-    query_param = request.args.get("query", "").lower()
+# GET /strings/filter-by-natural-language
+@app.route("/strings/filter-by-natural-language", methods=["GET"])
+def filter_natural_language():
+    query_text = request.args.get("query", "").lower()
     query = AnalyzedString.query
 
-    if "palindrome" in query_param:
+    if "palindrome" in query_text:
         query = query.filter(AnalyzedString.is_palindrome == True)
-    if "longer than" in query_param:
+    if "longer than" in query_text:
         try:
-            n = int(query_param.split("longer than")[1].split()[0])
+            n = int(query_text.split("longer than")[1].split()[0])
             query = query.filter(AnalyzedString.length > n)
-        except (ValueError, IndexError):
+        except:
             pass
-    if "shorter than" in query_param:
+    if "shorter than" in query_text:
         try:
-            n = int(query_param.split("shorter than")[1].split()[0])
+            n = int(query_text.split("shorter than")[1].split()[0])
             query = query.filter(AnalyzedString.length < n)
-        except (ValueError, IndexError):
+        except:
             pass
 
     results = [s.to_dict() for s in query.all()]
     return jsonify(results), 200
 
-# -----------------------------
+# ----------------------------
 # Run app
-# -----------------------------
+# ----------------------------
 if __name__ == "__main__":
-    with app.app_context():
-        db.create_all()
     app.run(debug=True)
